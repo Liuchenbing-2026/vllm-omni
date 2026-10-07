@@ -249,7 +249,7 @@ class OmniVoiceRMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if _TRITON_AVAILABLE:
+        if _TRITON_AVAILABLE and x.is_cuda:
             return triton_rms_norm(x, self.weight, self.eps)
         variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.eps)
@@ -345,7 +345,7 @@ class OmniVoiceMLP(nn.Module):
         self.down_proj = nn.Linear(config.llm_intermediate_size, config.llm_hidden_size, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if _TRITON_AVAILABLE:
+        if _TRITON_AVAILABLE and x.is_cuda:
             return self.down_proj(triton_swiglu(self.gate_proj(x), self.up_proj(x)))
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
@@ -371,7 +371,7 @@ class OmniVoiceTransformerBlock(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(hidden_states, attention_mask=attention_mask, cos=cos, sin=sin)
 
-        if _TRITON_AVAILABLE:
+        if _TRITON_AVAILABLE and hidden_states.is_cuda:
             # Fused: (attn_out + residual) + RMSNorm in one kernel
             hidden_states, residual = triton_fused_add_rms_norm(
                 hidden_states,
