@@ -606,15 +606,20 @@ class Qwen3MoeLLMModel(_Qwen3MoeLLMModel):
                 hidden_states = hidden_states + deepstack_input_embeds[f"deepstack_input_embeds_{layer_idx}"]
 
         if not get_pp_group().is_last_rank:
-            tensors = {"hidden_states": hidden_states, "residual": residual}
-            if captured_hidden_states:
-                tensors.update(
-                    {
-                        _get_capture_key(index): value
-                        for index, value in captured_hidden_states["hidden_states"]["layers"].items()
-                    }
-                )
-            return IntermediateTensors(tensors)
+            # Build the PP payload in a single expression: a local ``dict.update``
+            # survives into the Dynamo-transformed bytecode's ``co_names``, where
+            # vLLM's compile-time cudagraph guard rejects any ``update`` as a
+            # suspected nn.Module buffer mutation (issue #8818).  Nothing is
+            # mutated here, so express the merge as a dict literal instead.
+            captured = (
+                {
+                    _get_capture_key(index): value
+                    for index, value in captured_hidden_states["hidden_states"]["layers"].items()
+                }
+                if captured_hidden_states
+                else {}
+            )
+            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual, **captured})
         hidden_states, _ = self.norm(hidden_states, residual)
         if captured_hidden_states is not None:
             return hidden_states, captured_hidden_states

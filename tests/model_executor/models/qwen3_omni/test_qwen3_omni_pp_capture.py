@@ -114,3 +114,24 @@ def test_factory_declares_only_captures_from_earlier_ranks(monkeypatch, start, e
     buffers = model.make_empty_intermediate_tensors(4, dtype=torch.float32, device="cpu")
     assert set(buffers.tensors) == {"hidden_states", "residual"} | (expected if staged else set())
     assert all(value.shape == (4, 8) for value in buffers.tensors.values())
+
+
+def test_forward_transformed_bytecode_never_calls_update():
+    """Issue #8818: the cudagraph guard scans ``co_names`` for ``update``.
+
+    vLLM's compile wrapper rejects any transformed forward that mentions
+    ``update`` while cudagraph is enabled, because it cannot tell a local
+    ``dict.update`` from an nn.Module buffer mutation.  Building the PP payload
+    with a dict literal keeps the symbol out of the Thinker forward.
+    """
+    co_names = thinker_module.Qwen3MoeLLMModel.forward.__code__.co_names
+    assert "update" not in co_names
+    assert "IntermediateTensors" in co_names
+
+
+def test_capture_payload_is_merged_into_a_single_intermediate_tensors(monkeypatch):
+    embeddings = torch.arange(4 * 8, dtype=torch.float32).reshape(4, 8) / 8
+    result = _forward(monkeypatch, 0, 24, embeddings)
+    assert isinstance(result, IntermediateTensors)
+    # Rank [0, 24) only produces the capture for layer 0.
+    assert set(result.tensors) == {"hidden_states", "residual", "capture_0"}
