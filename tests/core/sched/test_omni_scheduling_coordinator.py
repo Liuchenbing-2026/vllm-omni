@@ -98,6 +98,36 @@ class MockQueue:
         self._items = [r for r in self._items if id(r) not in remove_set]
 
 
+class _CountingQueue(MockQueue):
+    """MockQueue that records how many removal calls the coordinator issues."""
+
+    def __init__(self, items: list | None = None):
+        super().__init__(items)
+        self.remove_request_calls = 0
+        self.removed_batches: list[list] = []
+
+    def remove_request(self, request):
+        self.remove_request_calls += 1
+        super().remove_request(request)
+
+    def remove_requests(self, requests):
+        batch = list(requests)
+        self.removed_batches.append(batch)
+        super().remove_requests(batch)
+
+
+class _RecordingList(list):
+    """List that counts per-request removals of the list-backed queue path."""
+
+    def __init__(self, items=()):
+        super().__init__(items)
+        self.remove_calls = 0
+
+    def remove(self, value):
+        self.remove_calls += 1
+        super().remove(value)
+
+
 # ------------------------------------------------------------------ #
 #  Tests
 # ------------------------------------------------------------------ #
@@ -141,6 +171,48 @@ def test_chunk_waiting_removes_request_from_running_list():
     assert running == []
     assert req.status == RequestStatus.WAITING_FOR_CHUNK
     assert list(coord._waiting_for_chunk_running) == [req]
+
+
+def test_waiting_queue_removal_is_batched_once_per_cycle():
+    """#8769: moved requests leave the queue in one batch, not one call each."""
+    coord = OmniSchedulingCoordinator(scheduler_max_num_seqs=16, stage_id=1, async_chunk=True)
+    fresh = [_make_request(f"r{i}", status=RequestStatus.RUNNING) for i in range(4)]
+    already = [_make_request(f"c{i}", status=RequestStatus.WAITING_FOR_CHUNK) for i in range(3)]
+    ready = _make_request("ready", status=RequestStatus.RUNNING)
+    queue = _CountingQueue([*fresh, ready, *already])
+
+    coord.process_pending_chunks(queue, [], {"ready"}, set())
+
+    assert queue.remove_request_calls == 0
+    assert queue.removed_batches == [[*fresh, *already]]
+    assert list(queue) == [ready]
+    assert list(coord._waiting_for_chunk_waiting) == [*fresh, *already]
+
+
+def test_list_backed_running_queue_is_rebuilt_in_place_without_removals():
+    """#8769: the list path rebuilds via slice assignment, never list.remove."""
+    coord = OmniSchedulingCoordinator(scheduler_max_num_seqs=16, stage_id=1, async_chunk=True)
+    moved_req = _make_request("m", status=RequestStatus.RUNNING)
+    kept_req = _make_request("k", status=RequestStatus.RUNNING)
+    running = _RecordingList([moved_req, kept_req])
+
+    coord.process_pending_chunks(MockQueue(), running, {"k"}, set())
+
+    assert running.remove_calls == 0
+    assert running == [kept_req]
+    assert list(coord._waiting_for_chunk_running) == [moved_req]
+
+
+def test_large_cycle_still_issues_a_single_removal_call():
+    """#8769: cost no longer grows with the number of moved requests."""
+    coord = OmniSchedulingCoordinator(scheduler_max_num_seqs=1024, stage_id=1, async_chunk=True)
+    queue = _CountingQueue([_make_request(f"r{i}", status=RequestStatus.RUNNING) for i in range(200)])
+
+    coord.process_pending_chunks(queue, [], set(), set())
+
+    assert len(queue.removed_batches) == 1
+    assert len(queue) == 0
+    assert len(coord._waiting_for_chunk_waiting) == 200
 
 
 class TestChunkCoordinatorUpdateRequestMetadata(unittest.TestCase):

@@ -443,36 +443,50 @@ class OmniSchedulingCoordinator:
         target_status: RequestStatus,
         chunk_ready_req_ids: set[str],
     ) -> None:
+        # Single-pass partition: route each request to either the retained
+        # queue or ``waiting_for_chunk_list``, then rebuild the queue once.
+        # Removing the moved requests one at a time inside the loop
+        # (``list.remove`` / ``remove_request``) rescanned the queue per moved
+        # request, making each cycle O(N*K) on the scheduler thread
+        # (issue #8769).  Per-request bookkeeping is unchanged.
         queue_snapshot = list(queue)
+        retained: list[Request] = []
+        moved: list[Request] = []
         for request in queue_snapshot:
             request_can_run = self._request_can_run(request, chunk_ready_req_ids)
+            keep = False
             if request.status != RequestStatus.WAITING_FOR_CHUNK:
                 if request_can_run:
                     if request.request_id in chunk_ready_req_ids:
                         self.requests_with_ready_chunks.add(request.request_id)
-                    continue
-                if request.status == RequestStatus.WAITING_FOR_INPUT:
-                    continue
-                self.pending_chunk_registrations.append(
-                    OmniChunkRecvHandle(
-                        request_id=request.request_id,
-                        external_req_id=request.external_req_id,
+                    keep = True
+                elif request.status == RequestStatus.WAITING_FOR_INPUT:
+                    keep = True
+                else:
+                    self.pending_chunk_registrations.append(
+                        OmniChunkRecvHandle(
+                            request_id=request.request_id,
+                            external_req_id=request.external_req_id,
+                        )
                     )
-                )
-                request.status = RequestStatus.WAITING_FOR_CHUNK
-                self._waiting_since.setdefault(request.request_id, time.monotonic())
-            else:
-                if request_can_run:
-                    request.status = target_status
-                    if request.request_id in chunk_ready_req_ids:
-                        self.requests_with_ready_chunks.add(request.request_id)
-                    self._waiting_since.pop(request.request_id, None)
-                    continue
-            if isinstance(queue, list):
-                queue.remove(request)
-            else:
-                queue.remove_request(request)
-            waiting_for_chunk_list.append(request)
+                    request.status = RequestStatus.WAITING_FOR_CHUNK
+                    self._waiting_since.setdefault(request.request_id, time.monotonic())
+            elif request_can_run:
+                request.status = target_status
+                if request.request_id in chunk_ready_req_ids:
+                    self.requests_with_ready_chunks.add(request.request_id)
+                self._waiting_since.pop(request.request_id, None)
+                keep = True
+            (retained if keep else moved).append(request)
+        if not moved:
+            return
+        if isinstance(queue, list):
+            # Slice-assign to keep the caller's list object, which the scheduler
+            # holds a direct reference to.
+            queue[:] = retained
+        else:
+            queue.remove_requests(moved)
+        waiting_for_chunk_list.extend(moved)
 
     def _request_can_run(
         self,
