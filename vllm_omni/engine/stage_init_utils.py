@@ -1483,6 +1483,30 @@ def _check_stage_device_layout(stage_config: Any, engine_args_dict: dict[str, An
         raise ValueError(message) from e
 
 
+def _normalize_fault_tolerance_config(engine_args_dict: dict[str, Any]) -> None:
+    """Drop an untouched serialized ``fault_tolerance_config`` default.
+
+    ``ParallelConfig`` declares ``fault_tolerance_config`` with
+    ``default_factory=FaultToleranceConfig``, so the field is never ``None``
+    and any ``asdict`` round-trip (the per-stage reconstruction in
+    :func:`build_vllm_config`) turns it into a plain dict even when the user
+    never opted in.  vLLM's ``EngineArgs.__post_init__`` reads *any*
+    dict-valued field as an explicit ``--fault-tolerance-config`` and
+    auto-enables fault tolerance, which then fails the internal-LB check.
+    Reconstruct the dataclass only when fault tolerance was explicitly
+    requested; otherwise drop the serialized default so the default stays off.
+    """
+    ft_config = engine_args_dict.get("fault_tolerance_config")
+    if not isinstance(ft_config, dict):
+        return
+    if engine_args_dict.get("enable_fault_tolerance"):
+        from vllm.config import FaultToleranceConfig
+
+        engine_args_dict["fault_tolerance_config"] = FaultToleranceConfig(**ft_config)
+    else:
+        engine_args_dict.pop("fault_tolerance_config")
+
+
 def build_vllm_config(
     stage_config: Any,
     model: str,
@@ -1522,6 +1546,8 @@ def build_vllm_config(
         from vllm.config import StructuredOutputsConfig
 
         filtered_engine_args_dict["structured_outputs_config"] = StructuredOutputsConfig(**soc)
+
+    _normalize_fault_tolerance_config(filtered_engine_args_dict)
 
     omni_engine_args = OmniEngineArgs(**filtered_engine_args_dict)
 
