@@ -203,6 +203,67 @@ def test_lora_manager_keeps_dlo_lora_buffers_on_compute_device(monkeypatch):
     assert pipeline.transformer.foo.lora_buffer_device == torch.device("cpu")
 
 
+def test_lora_manager_rehomes_sidecars_uploaded_while_the_base_was_offloaded(monkeypatch):
+    """#8817: a layer wrapped with its weights offloaded still uploads onto the compute device."""
+    import vllm_omni.diffusion.lora.manager as manager_mod
+    from vllm_omni.diffusion.lora.layers.base_linear import DiffusionBaseLinearLayerWithLoRA
+
+    class _OffloadedBaseLoRALayer(DummyBaseLayerWithLoRA):
+        """Wrapper whose stacked buffers were allocated where the base weights sat."""
+
+        def __init__(self, base_layer):
+            super().__init__(base_layer)
+            self.lora_a_stacked = (torch.zeros(1, 4),)
+            self.lora_b_stacked = (torch.zeros(4, 1),)
+
+        _move_lora_buffers = DiffusionBaseLinearLayerWithLoRA._move_lora_buffers
+
+    monkeypatch.setattr(manager_mod, "BaseLayerWithLoRA", _OffloadedBaseLoRALayer)
+    monkeypatch.setattr(
+        manager_mod,
+        "from_layer_diffusion",
+        lambda *, layer, **_kwargs: _OffloadedBaseLoRALayer(layer),
+    )
+
+    pipeline = torch.nn.Module()
+    pipeline.transformer = torch.nn.Module()
+    pipeline.transformer.foo = _FakeLinearBase()
+    # A device name that needs no accelerator: only the placement contract matters.
+    compute_device = torch.device("meta")
+    manager = DiffusionLoRAManager(
+        pipeline=pipeline,
+        device=compute_device,
+        dtype=torch.bfloat16,
+    )
+
+    # Registration while the base weights are offloaded (RL weight sync) leaves
+    # the sidecars where they were allocated: nothing re-homes them outside DLO.
+    manager._replace_layers_with_lora(type("_PH", (), {"r": 1})())
+    layer = pipeline.transformer.foo
+    assert layer.lora_a_stacked[0].device.type == "cpu"
+
+    rank = 2
+    lora = LoRALayerWeights(
+        module_name="transformer.foo",
+        rank=rank,
+        lora_alpha=rank,
+        lora_a=torch.ones((rank, 4)),
+        lora_b=torch.ones((4, rank)),
+    )
+    manager._registered_adapters = {
+        5: type(
+            "LM", (), {"id": 5, "loras": {"transformer.foo": lora}, "get_lora": lambda self, k: self.loras.get(k)}
+        )()
+    }
+
+    manager._activate_adapter(5, 1.0)
+
+    # The upload lands on the compute device, and the weights travel with it.
+    assert layer.lora_a_stacked[0].device == compute_device
+    assert layer.lora_b_stacked[0].device == compute_device
+    assert len(layer.set_calls) == 1
+
+
 def test_lora_manager_replaces_packed_layer_when_targeting_sublayers(monkeypatch):
     import vllm_omni.diffusion.lora.manager as manager_mod
 
