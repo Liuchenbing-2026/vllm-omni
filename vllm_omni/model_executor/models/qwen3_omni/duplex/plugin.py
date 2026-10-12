@@ -37,6 +37,18 @@ logger = init_logger(__name__)
 MAX_PROMPT_IMAGES = 8
 
 
+def _normalize_duplex_voice(value: object) -> str | None:
+    """Return the session-selected voice, normalized for the Talker.
+
+    Mirrors the chat-completions path: the Talker matches ``additional_information
+    ["speaker"]`` against lower-cased checkpoint keys, so the duplex plan has to
+    forward the same normalized form instead of dropping the field (#8815).
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.lower().strip()
+
+
 class QwenDataPlane(DuplexDataPlane):
     def __init__(self, encode_audio):
         self.encode_audio = encode_audio
@@ -435,7 +447,16 @@ class Qwen3OmniDuplexPlugin(DuplexModelPlugin):
                 logger.info("Qwen duplex visual input capture request=%s path=%s", request_id, target)
             except (OSError, ValueError):
                 logger.exception("Failed to capture Qwen visual input request=%s", request_id)
-        return DuplexAppendPlan(prompt={"prompt": prompt, "multi_modal_data": mm})
+        prompt_payload: dict[str, object] = {"prompt": prompt, "multi_modal_data": mm}
+        voice = _normalize_duplex_voice(session_config.get("voice")) or _normalize_duplex_voice(
+            runtime_config.get("voice")
+        )
+        if voice is not None:
+            # The Talker selects its speaker token from ``speaker``; without this
+            # the session voice set through ``session.update`` never left the
+            # engine and every utterance used the checkpoint default (#8815).
+            prompt_payload["additional_information"] = {"speaker": [voice]}
+        return DuplexAppendPlan(prompt=prompt_payload)
 
     def decide_output(self, **kwargs):
         return None

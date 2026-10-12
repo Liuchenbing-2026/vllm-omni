@@ -959,3 +959,65 @@ async def test_visual_capture_records_submitted_pixels_and_request(tmp_path, mon
             assert saved.tobytes() == actual.tobytes()
     finally:
         await h.manager.shutdown()
+
+
+def _plan_with_voice(*, session_voice=None, runtime_voice=None):
+    plugin = Qwen3OmniDuplexPlugin(lambda *args: None)
+    plugin.processor = SimpleNamespace(apply_chat_template=lambda messages, **kwargs: repr(messages))
+    state = plugin.create_session_state()
+    payload = {"audio": base64.b64encode(np.full(160, 0.1, dtype="<f4").tobytes()).decode()}
+    config = plugin.prepare_prompt_config({"conversation": []}, state=state, payload=payload)
+    if session_voice is not None:
+        config["voice"] = session_voice
+    runtime_config = {} if runtime_voice is None else {"voice": runtime_voice}
+    return plugin.plan_append(
+        request_id="voice",
+        fence=None,
+        session_config=config,
+        runtime_config=runtime_config,
+        seq=1,
+        turn_seq=1,
+        payload=payload,
+        final=True,
+        sampling_params=None,
+    )
+
+
+def test_duplex_prompt_forwards_the_session_voice_to_the_talker():
+    plan = _plan_with_voice(session_voice="Chelsie")
+
+    assert plan.prompt["additional_information"] == {"speaker": ["chelsie"]}
+
+
+def test_duplex_prompt_omits_speaker_when_no_voice_is_selected():
+    plan = _plan_with_voice()
+
+    assert "additional_information" not in plan.prompt
+
+
+@pytest.mark.parametrize("blank", ["", "   ", None, 7])
+def test_duplex_prompt_ignores_blank_or_non_string_voices(blank):
+    plan = _plan_with_voice(session_voice=blank)
+
+    assert "additional_information" not in plan.prompt
+
+
+def test_duplex_prompt_falls_back_to_the_runtime_voice():
+    plan = _plan_with_voice(runtime_voice="Ethan")
+
+    assert plan.prompt["additional_information"] == {"speaker": ["ethan"]}
+
+
+@pytest.mark.asyncio
+async def test_session_update_voice_reaches_the_next_append_prompt():
+    """#8815: the selected voice must survive session.update end to end."""
+    h = await open_qwen()
+    try:
+        await h.run(UpdateSession(patch={"voice": "Chelsie"}))
+        await h.run(append_audio())
+        await h.run(Commit(final=True, create_response=True))
+
+        prompt = h.port.submissions[-1].prompt
+        assert prompt["additional_information"]["speaker"] == ["chelsie"]
+    finally:
+        await h.manager.shutdown()
