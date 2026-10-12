@@ -1523,6 +1523,15 @@ def build_vllm_config(
 
         filtered_engine_args_dict["structured_outputs_config"] = StructuredOutputsConfig(**soc)
 
+    # A resolved False flag must survive serialization: EngineArgs interprets
+    # dict-valued FT config as a fresh opt-in. Raw config overrides without a
+    # resolved flag still retain upstream's automatic opt-in behavior.
+    ftc = filtered_engine_args_dict.get("fault_tolerance_config")
+    if isinstance(ftc, dict) and filtered_engine_args_dict.get("enable_fault_tolerance") is False:
+        from vllm.config.parallel import FaultToleranceConfig
+
+        filtered_engine_args_dict["fault_tolerance_config"] = FaultToleranceConfig(**ftc)
+
     omni_engine_args = OmniEngineArgs(**filtered_engine_args_dict)
 
     # Guard against a per-stage world size that its assigned ``devices`` cannot
