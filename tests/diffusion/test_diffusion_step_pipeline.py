@@ -29,6 +29,7 @@ from vllm_omni.diffusion.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm_omni.diffusion.executor.multiproc_executor import MultiprocDiffusionExecutor
+from vllm_omni.diffusion.interaction.coordinator import InteractionCoordinator
 from vllm_omni.diffusion.ipc import (
     pack_diffusion_output_shm,
     unpack_diffusion_output_shm,
@@ -173,6 +174,39 @@ class _FailsMidChunkPipeline(_ChunkedStepPipeline):
         super().step_scheduler(state, noise_pred, **kwargs)
         if state.chunk_index == 0 and state.step_in_chunk == 2:
             raise RuntimeError("boom mid chunk")
+
+
+class _LongChunkStepPipeline(_ChunkedStepPipeline):
+    """Streaming stub with two chunks of four denoise steps each."""
+
+    def prepare_encode(self, state, **kwargs):
+        super().prepare_encode(state, **kwargs)
+        state.timesteps = [torch.tensor(10), torch.tensor(5)] * 4
+        state.chunk_num_steps = 4
+        state.total_chunks = 2
+        state.chunk_index = 0
+        state.step_in_chunk = 0
+        return state
+
+
+class _BoundaryInteractionPipeline(_ChunkedStepPipeline):
+    """Streaming stub that records the interaction visible when its boundary hook runs."""
+
+    def __init__(self):
+        super().__init__()
+        # Stands in for the engine's interaction queue: a submission made while a
+        # chunk denoises is only visible after that chunk's grouped call returns.
+        self.pending_interaction: str | None = None
+        self.boundary_events: list[tuple[int, str | None]] = []
+
+    def peek_chunk_media(self, state):
+        raise AssertionError("the runner's boundary path never asks for chunk media")
+
+    def apply_interaction_at_chunk_boundary(self, state):
+        self.boundary_events.append((state.chunk_index, self.pending_interaction))
+
+    def prepare_next_chunk(self, state):
+        del state
 
 
 class _PerRequestErrorStepPipeline(_StepPipeline):
@@ -750,6 +784,7 @@ class TestRunner:
         runner.kv_cache = None
         runner.pipeline = pipeline
         runner.pipeline.supports_chunk_step_grouping = grouping
+        runner._grouped_chunk_steps = {}
         return runner
 
     @staticmethod
@@ -762,11 +797,9 @@ class TestRunner:
         return [o.get_request_output("req-1") for o in outputs]
 
     @pytest.mark.parametrize("grouping", [False, True])
-    def test_ar_runner_runs_every_step_of_a_chunk_in_one_call_when_the_pipeline_declares_it(
-        self, monkeypatch, grouping
-    ):
-        """With the capability declared, one AR runner call drives a whole chunk; the outputs are the same either way."""
-        runner = self._make_grouping_runner(_ChunkedStepPipeline(), grouping=grouping)
+    def test_ar_runner_groups_a_chunk_up_to_its_boundary_step(self, monkeypatch, grouping):
+        """With the capability declared, grouped calls drive every step of a chunk but its boundary step."""
+        runner = self._make_grouping_runner(_LongChunkStepPipeline(), grouping=grouping)
         monkeypatch.setattr(model_runner_module, "set_forward_context", _noop_forward_context)
         denoise_calls_after_each_call = []
         original = runner.execute_stepwise
@@ -778,23 +811,24 @@ class TestRunner:
 
         runner.execute_stepwise = counting
 
-        per_call = self._drive_to_completion(runner)
+        per_call = self._drive_to_completion(runner, num_steps=8)
 
         # Chunk outputs, and the steps they were emitted at, are identical.
         emitted = [(o.step_index, float(o.result.output[0])) for o in per_call if o.result is not None]
-        assert emitted == [(2, 0.0), (2, 1.0)]
+        assert emitted == [(4, 0.0), (4, 1.0)]
         assert per_call[-1].finished is True
-        assert runner.pipeline.denoise_calls == 4 and runner.pipeline.scheduler_calls == 4
+        assert runner.pipeline.denoise_calls == 8 and runner.pipeline.scheduler_calls == 8
         assert runner.pipeline.decode_calls == 2
         assert runner.pipeline.prepare_calls == 1
-        # One call per chunk with the capability, one per step without; a
-        # grouped call never crosses into the next chunk.
-        assert denoise_calls_after_each_call == ([2, 4] if grouping else [1, 2, 3, 4])
+        # A grouped call drives the chunk's steps together and stops one step
+        # short of the boundary, so the step that reaches it keeps its own
+        # call; a grouped call never crosses into the next chunk.
+        assert denoise_calls_after_each_call == ([3, 4, 7, 8] if grouping else [1, 2, 3, 4, 5, 6, 7, 8])
         assert "req-1" not in runner.state_cache
 
     def test_ar_runner_continues_a_grouped_chunk_as_a_cached_request(self, monkeypatch):
         """The first step admits the new request; every further step of the chunk is a cached-request continuation."""
-        runner = self._make_grouping_runner(_ChunkedStepPipeline(), grouping=True)
+        runner = self._make_grouping_runner(_LongChunkStepPipeline(), grouping=True)
         monkeypatch.setattr(model_runner_module, "set_forward_context", _noop_forward_context)
         seen = []
         original_core = DiffusionModelRunner._execute_stepwise_core
@@ -805,18 +839,18 @@ class TestRunner:
 
         monkeypatch.setattr(DiffusionModelRunner, "_execute_stepwise_core", recording_core)
 
-        first = runner.execute_stepwise(_make_scheduler_output(_make_step_request(4), finished_req_ids={"old"}))
+        first = runner.execute_stepwise(_make_scheduler_output(_make_step_request(8), finished_req_ids={"old"}))
 
-        assert first.get_request_output("req-1").result is not None
+        assert first.get_request_output("req-1").result is None
         assert runner.pipeline.prepare_calls == 1
-        assert len(seen) == 2
+        assert len(seen) == 3
         assert [n.request_id for n in seen[0].scheduled_new_reqs] == ["req-1"]
-        continuation = seen[1]
-        assert continuation.scheduled_new_reqs == []
-        assert continuation.scheduled_cached_reqs.request_ids == ["req-1"]
-        assert continuation.finished_req_ids == set()
-        assert continuation.kv_prefetch_job is None and continuation.kv_connector_metadata is None
-        assert continuation.step_id == seen[0].step_id
+        for continuation in seen[1:]:
+            assert continuation.scheduled_new_reqs == []
+            assert continuation.scheduled_cached_reqs.request_ids == ["req-1"]
+            assert continuation.finished_req_ids == set()
+            assert continuation.kv_prefetch_job is None and continuation.kv_connector_metadata is None
+            assert continuation.step_id == seen[0].step_id
 
     def test_ar_runner_grouped_steps_see_the_same_inputs_as_per_step_calls(self, monkeypatch):
         """Every grouped step sees the latents and timestep step_scheduler just advanced, exactly as per-step calls do."""
@@ -839,7 +873,9 @@ class TestRunner:
         runner = self._make_grouping_runner(_FailsMidChunkPipeline(), grouping=True)
         monkeypatch.setattr(model_runner_module, "set_forward_context", _noop_forward_context)
 
-        output = runner.execute_stepwise(_make_scheduler_output(_make_step_request(4)))
+        first = runner.execute_stepwise(_make_scheduler_output(_make_step_request(4)))
+        assert first.get_request_output("req-1").finished is False
+        output = runner.execute_stepwise(_make_cached_scheduler_output(step_id=1))
 
         failed = output.get_request_output("req-1")
         assert failed.finished is True
@@ -852,12 +888,46 @@ class TestRunner:
         monkeypatch.setattr(pipeline, "step_scheduler", lambda *args, **kwargs: None)
         runner = self._make_grouping_runner(pipeline, grouping=True)
         monkeypatch.setattr(model_runner_module, "set_forward_context", _noop_forward_context)
-        output = runner.execute_stepwise(_make_scheduler_output(_make_step_request(4)))
+        first = runner.execute_stepwise(_make_scheduler_output(_make_step_request(4)))
+        assert first.get_request_output("req-1").finished is False
+        output = runner.execute_stepwise(_make_cached_scheduler_output(step_id=1))
         failed = output.get_request_output("req-1")
         assert failed.finished
         assert "within 2 denoise steps" in failed.result.error
         assert pipeline.denoise_calls == 2
         assert "req-1" not in runner.state_cache
+
+    def test_ar_runner_applies_an_interaction_at_the_same_boundary_as_the_ungrouped_path(self, monkeypatch):
+        """#8756: an interaction queued while a chunk denoises takes effect from the next chunk in both modes."""
+        boundaries = {}
+        call_counts = {}
+        for grouping in (False, True):
+            pipeline = _BoundaryInteractionPipeline()
+            runner = self._make_grouping_runner(pipeline, grouping=grouping)
+            runner._interaction_coordinator = InteractionCoordinator({}, model_class_name="TestPipeline")
+            monkeypatch.setattr(model_runner_module, "set_forward_context", _noop_forward_context)
+            calls = []
+            original = runner.execute_stepwise
+
+            def counting(scheduler_output, _original=original, _calls=calls, _pipeline=pipeline):
+                output = _original(scheduler_output)
+                _calls.append(output)
+                if len(_calls) == 1:
+                    # The engine only drains the interaction queue between two
+                    # worker calls, so a submission made while chunk 0 was
+                    # denoising becomes visible right here.
+                    _pipeline.pending_interaction = "beach"
+                return output
+
+            runner.execute_stepwise = counting
+            self._drive_to_completion(runner)
+            boundaries[grouping] = pipeline.boundary_events
+            call_counts[grouping] = len(calls)
+
+        # post_decode() advances chunk_index, so (1, "beach") means the
+        # interaction is applied at chunk 0's boundary and used from chunk 1 on.
+        assert boundaries[True] == boundaries[False] == [(1, "beach")]
+        assert call_counts[False] == 4
 
     def test_base_runner_never_groups_and_the_ar_policy_needs_capability_streaming_and_one_request(self, monkeypatch):
         """The shared runner is one step per call; the AR runner groups only a lone streaming request that declares it."""

@@ -196,6 +196,7 @@ def make_runner(
     runner._session_capacity = 0
     runner._perf_e2e_times = []
     runner._stepwise_chunk_started = {}
+    runner._grouped_chunk_steps = {}
     runner._preallocate_kv_cache(available_bytes=available_bytes)
     return runner
 

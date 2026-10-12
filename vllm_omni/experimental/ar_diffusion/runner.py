@@ -125,6 +125,10 @@ class ARDiffusionModelRunner(DiffusionModelRunner):
         # ``_perf_e2e_times`` keeps one entry per AR block in both execution
         # modes instead of one entry per denoise step.
         self._stepwise_chunk_started: dict[str, float] = {}
+        # Denoise steps each request's in-flight chunk has already taken, so the
+        # grouped loop's bound stays exact when the step that reaches the chunk
+        # boundary is left to a later call (see ``_execute_stepwise_core``).
+        self._grouped_chunk_steps: dict[str, int] = {}
 
     @staticmethod
     def _require_capability(pipeline: object) -> SupportsARDiffusionPipeline:
@@ -355,6 +359,7 @@ class ARDiffusionModelRunner(DiffusionModelRunner):
         """
         for request_id in getattr(scheduler_output, "finished_req_ids", None) or ():
             self._stepwise_chunk_started.pop(request_id, None)
+            self._grouped_chunk_steps.pop(request_id, None)
             if request_id in self._sessions:
                 self._release_session(
                     request_id,
@@ -434,6 +439,12 @@ class ARDiffusionModelRunner(DiffusionModelRunner):
         error), finishes the request, or leaves it without state; the base
         core already handles a mid-chunk failure or interrupt by finishing
         the request with an error and dropping its state.
+
+        The step that reaches the chunk boundary is deliberately left to the
+        next scheduler cycle: an interaction submitted while the chunk was
+        denoising is only drained between two worker calls, so a boundary
+        applied inside this call would miss it and take effect one chunk late.
+        Every other step of the chunk is still grouped.
         """
         output = super()._execute_stepwise_core(
             scheduler_output,
@@ -443,6 +454,10 @@ class ARDiffusionModelRunner(DiffusionModelRunner):
         if not self._groups_chunk_steps(scheduler_output):
             return output
         request_id = scheduler_output.scheduled_request_ids[0]
+        # The step taken above is this chunk's first step of this call; earlier
+        # grouped calls may already have driven part of the same chunk.
+        steps = self._grouped_chunk_steps.get(request_id, 0) + 1
+        self._grouped_chunk_steps[request_id] = steps
         continuation = dataclasses.replace(
             scheduler_output,
             scheduled_new_reqs=[],
@@ -452,25 +467,32 @@ class ARDiffusionModelRunner(DiffusionModelRunner):
             kv_connector_metadata=None,
         )
         if not self._chunk_step_pending(output, request_id):
+            self._grouped_chunk_steps.pop(request_id, None)
             return output
         max_steps = self.state_cache[request_id].chunk_num_steps
         if max_steps is None:
+            self._grouped_chunk_steps.pop(request_id, None)
             return output
-        steps = 1
         while self._chunk_step_pending(output, request_id):
             if steps >= max_steps:
+                self._grouped_chunk_steps.pop(request_id, None)
                 self.state_cache.pop(request_id)
                 runner_output = output.get_request_output(request_id)
                 assert runner_output is not None
                 runner_output.finished = True
                 runner_output.result = DiffusionOutput(error=f"Chunk did not complete within {max_steps} denoise steps")
                 break
+            if steps >= max_steps - 1:
+                break
             steps += 1
+            self._grouped_chunk_steps[request_id] = steps
             output = super()._execute_stepwise_core(
                 continuation,
                 record_output_peak_memory=record_output_peak_memory,
                 in_diffusion_kv_memory_profile=in_diffusion_kv_memory_profile,
             )
+        if not self._chunk_step_pending(output, request_id):
+            self._grouped_chunk_steps.pop(request_id, None)
         return output
 
     def _chunk_step_pending(self, output: BatchRunnerOutput, request_id: str) -> bool:
@@ -547,6 +569,7 @@ class ARDiffusionModelRunner(DiffusionModelRunner):
         session is still present and is released here.
         """
         self._stepwise_chunk_started.pop(request_id, None)
+        self._grouped_chunk_steps.pop(request_id, None)
         state_cache = getattr(self, "state_cache", None)
         if isinstance(state_cache, dict):
             state_cache.pop(request_id, None)
