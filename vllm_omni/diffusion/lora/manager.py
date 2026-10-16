@@ -749,10 +749,29 @@ class DiffusionLoRAManager:
             lora_layer.reset_lora(0)
         self._suspended_adapter_id = None
 
+    def _pin_lora_buffers_to_compute_device(self) -> None:
+        """Move every wrapped layer's stacked sidecars onto the compute device.
+
+        Upstream vLLM wraps LoRA layers once the weights are already on the
+        device, so its `create_lora_weights` allocates the stacked buffers there
+        and an upload only `copy_`s into them. Diffusion wraps layers when an
+        adapter is registered, which can happen while the base weights are
+        offloaded or asleep (an RL weight sync), so the allocation-time weight
+        device is not a reliable execution device. Re-home the buffers before an
+        upload so `apply()` never matmuls device activations against host
+        buffers. A layer already resident on the compute device is a no-op.
+        """
+        for lora_layer in self._lora_modules.values():
+            move = getattr(lora_layer, "_move_lora_buffers", None)
+            if callable(move):
+                move(self.device)
+
     def _activate_adapter(self, adapter_id: int, scale: float) -> None:
         if self._is_active_at_scale(adapter_id, scale):
             logger.debug("Adapter %d already active at scale %.3f skipping", adapter_id, scale)
             return
+
+        self._pin_lora_buffers_to_compute_device()
 
         if self._suspended_adapter_id == adapter_id and self._adapter_scales.get(
             adapter_id
