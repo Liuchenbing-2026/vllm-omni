@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from typing_extensions import override
 from vllm.config import ProfilerConfig
@@ -17,6 +18,40 @@ from vllm_omni.profiler.omni_torch_profiler import (
 logger = init_logger(__name__)
 
 
+class _ClosableRecordSchedule:
+    """Schedule that records continuously until it is explicitly closed.
+
+    ``torch_npu.profiler.profile`` falls back to its internal
+    ``_default_schedule_fn`` when no ``schedule`` is supplied, and that
+    function returns ``ProfilerAction.RECORD`` forever. ``stop()`` therefore
+    always leaves through ``transit_action(RECORD, None)`` -- the profiler's
+    "Incorrect schedule: Stop profiler while current state is RECORD" branch,
+    whose trace export crashes the process on Ascend (issue #6620).
+
+    This schedule keeps the documented "record until ``/stop_profile``"
+    semantics (no ``active`` window is imposed) and only switches to
+    ``RECORD_AND_SAVE`` once :meth:`close` has been called, so a single
+    ``step()`` moves the state machine onto the regular exit branch.
+
+    Only ``_closed`` lives in ``__dict__`` because torch_npu serialises the
+    schedule object into ``profiler_info.json`` via ``__dict__``.
+    """
+
+    def __init__(self) -> None:
+        self._closed = False
+
+    def close(self) -> None:
+        """Leave the recording window on the next ``step()``."""
+        self._closed = True
+
+    def __call__(self, step: int) -> Any:
+        from torch_npu.profiler import ProfilerAction
+
+        if self._closed:
+            return ProfilerAction.RECORD_AND_SAVE
+        return ProfilerAction.RECORD
+
+
 class NPUTorchProfilerWrapper(OmniTorchProfilerWrapper):
     """NPU-specific profiler using torch_npu.profiler.
 
@@ -27,6 +62,18 @@ class NPUTorchProfilerWrapper(OmniTorchProfilerWrapper):
     - No key_averages() support - requires offline parsing with
       torch_npu.profiler.profiler.analyse()
     """
+
+    def __init__(
+        self,
+        profiler_config: ProfilerConfig,
+        worker_name: str,
+        local_rank: int,
+        activities: list[TorchProfilerActivity] | None = None,
+    ) -> None:
+        # Number of profiling windows already started by this wrapper; used to
+        # decide whether the torch_npu profiler instance has to be rebuilt.
+        self._windows_started = 0
+        super().__init__(profiler_config, worker_name, local_rank, activities)
 
     @override
     def _get_default_activities(self) -> list[TorchProfilerActivity]:
@@ -67,8 +114,15 @@ class NPUTorchProfilerWrapper(OmniTorchProfilerWrapper):
         os.makedirs(npu_trace_dir, exist_ok=True)
         self._trace_path = npu_trace_dir
 
+        # Never let torch_npu fall back to ``_default_schedule_fn``: that
+        # schedule can only ever be stopped mid-RECORD. ``_stop`` closes this
+        # schedule so the profiler leaves the capture window on a known
+        # boundary before the trace is exported.
+        self._schedule = _ClosableRecordSchedule()
+
         return torch_npu.profiler.profile(
             activities=npu_activities,
+            schedule=self._schedule,
             with_stack=False,
             profile_memory=profiler_config.torch_profiler_with_memory,
             # Forward the shape-recording flag; without it the NPU profiler
@@ -83,6 +137,32 @@ class NPUTorchProfilerWrapper(OmniTorchProfilerWrapper):
             # this specific handler format
             on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(npu_trace_dir),
         )
+
+    @override
+    def _start(self) -> None:
+        # ``torch_npu.profiler.profile`` cannot be restarted once stopped: its
+        # action state machine keeps the terminal action and the profiling
+        # directory is released, so a second window on the same instance emits
+        # no trace. Rebuild profiler and schedule per window instead, mirroring
+        # vLLM's own ``TorchProfilerWrapper``. The instance created by
+        # ``__init__`` is still fresh, so it is reused for the first window and
+        # never discarded unstarted.
+        if self._windows_started:
+            self.profiler = self._create_profiler(self.profiler_config, self._activities)
+        self._windows_started += 1
+        super()._start()
+
+    @override
+    def _stop(self) -> None:
+        """Close the recording window before stopping (issue #6620).
+
+        ``stop_profile`` is an out-of-band call, so without this the profiler
+        is always stopped mid-RECORD on the default configuration and the NPU
+        trace export runs on an inconsistent capture state.
+        """
+        self._schedule.close()
+        self.profiler.step()
+        super()._stop()
 
     @override
     def _on_stop_hook(self) -> None:
