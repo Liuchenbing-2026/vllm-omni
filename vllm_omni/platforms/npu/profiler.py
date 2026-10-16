@@ -33,15 +33,17 @@ class _ClosableRecordSchedule:
 
     This schedule keeps the documented "record until ``/stop_profile``"
     semantics (no ``active`` window is imposed) and only switches to
-    ``RECORD_AND_SAVE`` once :meth:`close` has been called, so a single
-    ``step()`` moves the state machine onto the regular exit branch.
+    ``RECORD_AND_SAVE`` for one step after :meth:`close`, then ``NONE``.
+    Two steps therefore finish trace export through the normal cycle boundary
+    before ``stop()`` releases the already inactive profiler.
 
-    Only ``_closed`` lives in ``__dict__`` because torch_npu serialises the
-    schedule object into ``profiler_info.json`` via ``__dict__``.
+    Keep schedule state JSON-serializable because torch_npu stores its
+    ``__dict__`` in ``profiler_info.json``.
     """
 
     def __init__(self) -> None:
         self._closed = False
+        self._save_step: int | None = None
 
     def close(self) -> None:
         """Leave the recording window on the next ``step()``."""
@@ -50,9 +52,13 @@ class _ClosableRecordSchedule:
     def __call__(self, step: int) -> ProfilerAction:
         from torch_npu.profiler import ProfilerAction
 
-        if self._closed:
+        if not self._closed:
+            return ProfilerAction.RECORD
+        if self._save_step is None:
+            self._save_step = step
+        if step == self._save_step:
             return ProfilerAction.RECORD_AND_SAVE
-        return ProfilerAction.RECORD
+        return ProfilerAction.NONE
 
 
 class NPUTorchProfilerWrapper(OmniTorchProfilerWrapper):
@@ -158,10 +164,11 @@ class NPUTorchProfilerWrapper(OmniTorchProfilerWrapper):
 
         ``stop_profile`` is an out-of-band call, so without this the profiler
         is always stopped mid-RECORD on the default configuration and the NPU
-        trace export runs on an inconsistent capture state.
+        trace export runs through the incomplete-cycle exit branch.
         """
         self._schedule.close()
-        self.profiler.step()
+        self.profiler.step()  # RECORD -> RECORD_AND_SAVE
+        self.profiler.step()  # RECORD_AND_SAVE -> NONE, export the trace
         super()._stop()
 
     @override

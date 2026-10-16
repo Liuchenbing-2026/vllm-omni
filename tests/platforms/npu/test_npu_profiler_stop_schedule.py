@@ -6,8 +6,7 @@
 when no ``schedule`` is supplied, and that function returns
 ``ProfilerAction.RECORD`` forever. ``stop()`` then always takes the
 ``transit_action(RECORD, None)`` branch, whose trace export can segfault on
-Ascend. The NPU wrapper must install a closable schedule and close it (one
-``step()``) before stopping, on the *default* profiler configuration.
+Ascend. The NPU wrapper must install a closable schedule and finish its recording cycle before stopping, on the *default* profiler configuration.
 
 The regression is therefore driven through the default config: no schedule is
 configured by the user, as before the fix. These tests run on CPU against a
@@ -24,6 +23,7 @@ import pytest
 from torch.profiler import ProfilerAction
 from vllm.config import ProfilerConfig
 
+from vllm_omni.platforms.npu import profiler as npu_profiler
 from vllm_omni.platforms.npu.profiler import NPUTorchProfilerWrapper
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -36,12 +36,18 @@ class _FakeProfiler:
         self.kwargs = kwargs
         self.calls = calls
         self.stopped = False
+        self.step_num = 0
+        schedule = kwargs.get("schedule", lambda _: ProfilerAction.RECORD)
+        self.current_action = schedule(self.step_num)
 
     def start(self):
         self.calls.append("start")
 
     def step(self):
         self.calls.append("step")
+        self.step_num += 1
+        schedule = self.kwargs.get("schedule", lambda _: ProfilerAction.RECORD)
+        self.current_action = schedule(self.step_num)
 
     def stop(self):
         self.calls.append("stop")
@@ -102,7 +108,7 @@ def test_default_config_installs_a_schedule(tmp_path, monkeypatch):
 
 
 def test_stop_closes_the_window_before_stopping(tmp_path, monkeypatch):
-    """``_stop`` must leave RECORD via one ``step()`` before ``stop()``."""
+    """``stop`` must finish the recording cycle before backend ``stop``."""
     created: list = []
     calls: list = []
     wrapper = _build_wrapper(tmp_path, monkeypatch, created, calls)
@@ -113,8 +119,9 @@ def test_stop_closes_the_window_before_stopping(tmp_path, monkeypatch):
 
     wrapper.stop()
 
-    assert calls == ["start", "step", "stop"]
-    assert schedule(2) is ProfilerAction.RECORD_AND_SAVE
+    assert calls == ["start", "step", "step", "stop"]
+    assert wrapper.profiler.current_action is ProfilerAction.NONE
+    assert schedule(2) is ProfilerAction.NONE
     assert not wrapper.is_running
 
 
@@ -152,7 +159,7 @@ def test_second_window_rebuilds_profiler_and_schedule(tmp_path, monkeypatch):
     assert created[1].kwargs["schedule"](0) is ProfilerAction.RECORD
 
     wrapper.stop()
-    assert calls == ["start", "step", "stop", "start", "step", "stop"]
+    assert calls == ["start", "step", "step", "stop", "start", "step", "step", "stop"]
 
 
 def test_public_start_stop_are_idempotent(tmp_path, monkeypatch):
@@ -166,6 +173,17 @@ def test_public_start_stop_are_idempotent(tmp_path, monkeypatch):
     wrapper.stop()
     wrapper.stop()
 
-    assert calls == ["start", "step", "stop"]
+    assert calls == ["start", "step", "step", "stop"]
     assert len(created) == 1
     assert not wrapper.is_running
+
+
+def test_closed_schedule_finishes_after_one_save_step(monkeypatch):
+    _install_fake_torch_npu(monkeypatch, [], [])
+    schedule = npu_profiler._ClosableRecordSchedule()
+    assert schedule(10000) is ProfilerAction.RECORD
+    schedule.close()
+    assert schedule(10001) is ProfilerAction.RECORD_AND_SAVE
+    assert schedule(10001) is ProfilerAction.RECORD_AND_SAVE
+    assert schedule(10002) is ProfilerAction.NONE
+    assert schedule(10003) is ProfilerAction.NONE
