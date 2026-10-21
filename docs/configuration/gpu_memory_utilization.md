@@ -19,7 +19,7 @@ For each stage, vLLM-Omni calculates the requested memory as:
 requested_memory = total_gpu_memory × gpu_memory_utilization
 ```
 
-When other stages already occupy the same GPU, Omni caps this requested budget:
+On discrete GPUs, when other stages already occupy the same GPU, Omni caps this requested budget:
 
 ```text
 requested_memory = min(requested_memory, free_memory)
@@ -29,6 +29,13 @@ The worker logs a warning when it caps the budget. Model and runtime allocations
 are subtracted from that budget when sizing the KV cache. Initialization can
 still fail if the remaining budget cannot hold the required cache. Raising
 `gpu_memory_utilization` does not increase a budget already capped to free memory.
+
+On integrated GPUs, such as Jetson and DGX Spark, device memory is shared with
+the host. AR and generation workers instead use upstream vLLM's strict budget
+validation: if the requested budget exceeds the free memory at stage startup,
+initialization raises an error rather than assigning all free host RAM to the
+stage. Reduce each stage's `gpu_memory_utilization`, leaving room for the OS and
+other processes. The comparison uses the rounded-up requested byte count.
 
 ### Memory Components
 
@@ -115,8 +122,14 @@ stages:
   - stage_id: 1
     devices: "0"
     gpu_memory_utilization: 0.3  # Uses 30% of GPU 0
-    # Total: 90% of GPU 0 (safe, leaves 10% buffer)
+    # Planned total: 90% of GPU 0; check free memory at each stage's startup.
 ```
+
+On integrated GPUs, a combined utilization below 1.0 does not make this split
+automatically safe. Each stage must satisfy
+`free_memory >= ceil(total_memory * gpu_memory_utilization)` at its own startup,
+after the OS and earlier stages have allocated memory. A later stage can fail
+this check even when the planned utilization adds up to 0.9.
 
 **Important:** If stages run on different GPUs, each can use up to 1.0 independently.
 

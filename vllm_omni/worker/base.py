@@ -280,9 +280,9 @@ class OmniGPUWorkerBase(GPUWorker):
         a stage tuned before the reserve existed keeps its effective KV size by
         raising ``gpu_memory_utilization`` by the graph pool's share. That only
         works while the raised budget still fits in the memory free at startup.
-        Otherwise ``request_memory_tolerant`` caps it to the free memory, the
-        normal case for co-located Omni stages, and the log says the previous
-        size cannot be restored.
+        Otherwise the previous size cannot be restored: discrete GPUs cap the
+        budget to free memory, while integrated GPUs reject an oversized
+        budget at initialization.
         """
         if cudagraph_memory_estimate <= 0:
             return
