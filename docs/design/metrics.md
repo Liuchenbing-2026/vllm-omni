@@ -81,6 +81,16 @@ Image and diffusion metrics use two cooperating collectors. `OmniPrometheusMetri
 
 Zero and missing values have different meanings. Valid zero-duration queue observations are recorded, while unavailable optional measurements are omitted instead of being exported as synthetic zeroes. `peak_memory_mb`, `diffusion_forward_s`, `diffusion_kv_load_s`, `vae_decode_s`, and `kv_wait_s` therefore appear only when their data source is active.
 
+For diffusion requests, `queue_wait_ms` in `stage_durations` and the corresponding
+`request_queue_wait_s` Histogram measure only the handoff to the Orchestrator.
+They do not include the wait inside the diffusion scheduler, so a small value
+does not mean that a serialized model has spare capacity. Use the per-stage
+`stage_in_queue_s` Histogram for the interval from scheduler admission to the
+request's first scheduled execution. That interval is already included in
+`stage_gen_time_s` / `stage_<id>_gen_ms` and `diffusion_exec_s`: adding it to
+those generation or execution times would count the same wait twice. These
+metrics are overlapping views, not disjoint components to sum into E2E latency.
+
 #### Path 3: Audio modality metrics (`vllm_omni:audio_*`)
 
 `OmniModalityMetrics` registers seven audio families with `{model_name, stage, replica}` (plus an extra `threshold_ms` / `reason` label on the two extra-cardinality Counters). Three observation sites:
