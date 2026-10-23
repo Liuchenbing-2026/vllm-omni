@@ -487,7 +487,7 @@ async def test_server_worker_keeps_engine_alive_until_http_shutdown(monkeypatch,
 
         return asyncio.create_task(wait_for_shutdown())
 
-    async def fake_storage_start():
+    async def fake_storage_start(*, expiration_callback=None):
         events.append("storage_start")
 
     async def fake_get_vllm_config(engine_client):

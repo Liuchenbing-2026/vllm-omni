@@ -107,7 +107,7 @@ async def test_omni_run_server_worker_forwards_client_config(monkeypatch):
     monkeypatch.setattr(api_server, "omni_init_app_state", lambda *_args: asyncio.sleep(0))
     monkeypatch.setattr(api_server, "shutdown_unsupported_routes", lambda *_args: None)
 
-    async def fake_storage_start() -> None:
+    async def fake_storage_start(*, expiration_callback=None) -> None:
         return None
 
     monkeypatch.setattr(api_server.STORAGE_MANAGER, "start", fake_storage_start)
@@ -495,8 +495,12 @@ async def test_api_server_assembly_replaces_upstream_routes_and_mounts_omni_rout
             shutdown=lambda: captured.__setitem__("speech_shutdown", True),
         )
 
-    async def fake_storage_start():
+    async def fake_storage_start(*, expiration_callback=None):
         captured["storage_started"] = True
+        captured["expiration_callback"] = expiration_callback
+
+    async def fake_storage_stop():
+        captured["storage_stopped"] = True
 
     async def fake_serve_http(app, **_kwargs):
         captured["served_app"] = app
@@ -512,7 +516,9 @@ async def test_api_server_assembly_replaces_upstream_routes_and_mounts_omni_rout
         "shutdown_unsupported_routes",
         lambda app, restrictions: captured.setdefault("restrictions", restrictions),
     )
-    monkeypatch.setattr(api_server, "STORAGE_MANAGER", SimpleNamespace(start=fake_storage_start))
+    monkeypatch.setattr(
+        api_server, "STORAGE_MANAGER", SimpleNamespace(start=fake_storage_start, stop=fake_storage_stop)
+    )
     monkeypatch.setattr(api_server, "serve_http", fake_serve_http)
 
     sock = _FakeSocket()
@@ -528,6 +534,8 @@ async def test_api_server_assembly_replaces_upstream_routes_and_mounts_omni_rout
 
     assert captured["supported_tasks"] == ("generate",)
     assert captured["storage_started"] is True
+    assert captured["expiration_callback"] == api_server.VIDEO_STORE.pop_many
+    assert captured["storage_stopped"] is True
     assert captured["restrictions"] == {}
     assert captured["video_shutdown"] is True
     assert captured["speech_shutdown"] is True
@@ -607,7 +615,7 @@ async def test_api_server_assembly_exposes_only_supported_tokenization_routes(
     monkeypatch.setattr(api_server, "build_async_omni", build_engine)
     monkeypatch.setattr(api_server, "omni_init_app_state", init_app_state)
     monkeypatch.setattr(api_server, "serve_http", serve_http)
-    monkeypatch.setattr(api_server.STORAGE_MANAGER, "start", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(api_server.STORAGE_MANAGER, "start", lambda **_kwargs: asyncio.sleep(0))
 
     await api_server.omni_run_server_worker(
         "127.0.0.1:8000", _FakeSocket(), _minimal_args(enable_tokenizer_info_endpoint=tokenizer_info_enabled)
@@ -672,7 +680,11 @@ async def test_timestamp_middleware_stamps_http_and_passes_websocket(monkeypatch
     monkeypatch.setattr(api_server, "build_async_omni", fake_build_async_omni)
     monkeypatch.setattr(api_server, "omni_init_app_state", fake_omni_init_app_state)
     monkeypatch.setattr(api_server, "shutdown_unsupported_routes", lambda *_a, **_k: None)
-    monkeypatch.setattr(api_server, "STORAGE_MANAGER", SimpleNamespace(start=lambda: asyncio.sleep(0)))
+    monkeypatch.setattr(
+        api_server,
+        "STORAGE_MANAGER",
+        SimpleNamespace(start=lambda **_kwargs: asyncio.sleep(0), stop=lambda: asyncio.sleep(0)),
+    )
     monkeypatch.setattr(api_server, "serve_http", fake_serve_http)
 
     await api_server.omni_run_server_worker("127.0.0.1:8000", _FakeSocket(), _minimal_args())

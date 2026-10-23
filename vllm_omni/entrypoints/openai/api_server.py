@@ -20,7 +20,7 @@ import socket
 import time
 from argparse import Namespace
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from http import HTTPStatus
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -379,10 +379,10 @@ async def omni_run_server_worker(
     if log_config is not None:
         uvicorn_kwargs["log_config"] = log_config
 
-    async with build_async_omni(
-        args,
-        client_config=client_config,
-    ) as engine_client:
+    async with (
+        build_async_omni(args, client_config=client_config) as engine_client,
+        AsyncExitStack() as storage_lifespan,
+    ):
         supported_tasks: tuple[str, ...]
         if hasattr(engine_client, "get_supported_tasks"):
             supported_tasks = tuple(await engine_client.get_supported_tasks())
@@ -443,7 +443,8 @@ async def omni_run_server_worker(
             logger.warning("engine client has no endpoint restrictions attribute")
 
         # Start background processes
-        await STORAGE_MANAGER.start()
+        storage_lifespan.push_async_callback(STORAGE_MANAGER.stop)
+        await STORAGE_MANAGER.start(expiration_callback=VIDEO_STORE.pop_many)
 
         # Conditionally register profiler endpoints based on stage YAML configs
         stage_configs = engine_client.stage_configs if hasattr(engine_client, "stage_configs") else None
