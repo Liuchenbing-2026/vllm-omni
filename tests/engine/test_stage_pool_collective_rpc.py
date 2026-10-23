@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from vllm.lora.request import LoRARequest
 
 from vllm_omni.engine.stage_pool import StagePool
 
@@ -213,5 +214,137 @@ def test_cache_reset_failure_is_serialized_and_pool_remains_usable(method, failu
         client.collective_rpc_async.assert_not_awaited()
         # A subsequent control request still completes on the same pool.
         assert await pool.collective_rpc(0, "is_sleeping") == {"via": "collective"}
+
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+def test_collective_rpc_add_lora_uses_typed_engine_helper():
+    async def run() -> None:
+        request = LoRARequest(lora_name="adapter", lora_int_id=1, lora_path="/unused/adapter")
+        add_lora = AsyncMock(return_value=True)
+        pool, client = _make_pool(add_lora_async=add_lora)
+        assert await pool.collective_rpc(0, "add_lora", args=(request,)) is True
+        add_lora.assert_awaited_once_with(request)
+        client.collective_rpc_async.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+def test_collective_rpc_add_lora_missing_helper_does_not_fall_back():
+    async def run() -> None:
+        pool, client = _make_pool()
+        result = await pool.collective_rpc(0, "add_lora", args=("unused",))
+        assert result["supported"] is False
+        assert "add_lora_async" in result["error"]
+        client.collective_rpc_async.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+def test_collective_rpc_add_lora_preserves_failure_result():
+    async def run() -> None:
+        add_lora = AsyncMock(side_effect=RuntimeError("invalid adapter"))
+        pool, client = _make_pool(add_lora_async=add_lora)
+        result = await pool.collective_rpc(0, "add_lora", args=("unused",))
+        assert result["supported"] is False
+        assert result["error"] == "invalid adapter"
+        client.collective_rpc_async.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+def test_collective_rpc_add_lora_honors_timeout_without_raising():
+    async def slow_add(_request: object) -> bool:
+        await asyncio.sleep(1.0)
+        return True
+
+    async def run() -> None:
+        pool, client = _make_pool(add_lora_async=AsyncMock(side_effect=slow_add))
+        result = await pool.collective_rpc(0, "add_lora", timeout=0.01, args=("unused",))
+        assert result["supported"] is False
+        assert "TimeoutError" in result["error"]
+        client.collective_rpc_async.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+def test_collective_rpc_diffusion_add_lora_keeps_collective_path():
+    async def run() -> None:
+        add_lora = AsyncMock(return_value=True)
+        pool, client = _make_pool(stage_type="diffusion", add_lora_async=add_lora)
+        assert await pool.collective_rpc(0, "add_lora", args=("request",)) == {"via": "collective"}
+        add_lora.assert_not_awaited()
+        client.collective_rpc_async.assert_awaited_once_with(
+            method="add_lora", timeout=None, args=("request",), kwargs={}
+        )
+
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("method,args", [("remove_lora", (1,)), ("pin_lora", (1,)), ("list_loras", ())])
+def test_collective_rpc_other_lora_methods_keep_collective_path(method, args):
+    async def run() -> None:
+        helper = AsyncMock(return_value=True)
+        pool, client = _make_pool(**{f"{method}_async": helper})
+        assert await pool.collective_rpc(0, method, args=args) == {"via": "collective"}
+        helper.assert_not_awaited()
+        client.collective_rpc_async.assert_awaited_once_with(method=method, timeout=None, args=args, kwargs={})
+
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+def test_collective_rpc_add_lora_survives_real_utility_codec():
+    from vllm.v1.engine.core import EngineCore, EngineCoreProc
+    from vllm.v1.engine.core_client import AsyncMPClient
+    from vllm.v1.executor.abstract import Executor
+    from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, run_method
+
+    class Worker:
+        received = None
+
+        def add_lora(self, request: LoRARequest) -> bool:
+            self.received = request
+            return request.lora_int_id > 0
+
+    worker = Worker()
+
+    class InProcessExecutor:
+        add_lora = Executor.add_lora
+
+        def collective_rpc(self, method, timeout=None, args=(), kwargs=None):
+            return [run_method(worker, method, args, kwargs or {})]
+
+    class UtilityRoundTripClient:
+        # The process, ZMQ transport and model executor are the explicit test
+        # boundaries; vLLM's utility client, codec and argument conversion run.
+        stage_type = "llm"
+        collective_rpc_async = AsyncMPClient.collective_rpc_async
+        add_lora_async = AsyncMPClient.add_lora_async
+
+        def __init__(self):
+            self.encoder = MsgpackEncoder()
+            self.decoder = MsgpackDecoder()
+            self.core = EngineCore.__new__(EngineCore)
+            self.core.model_executor = InProcessExecutor()
+
+        async def call_utility_async(self, method, *args):
+            _, _, decoded_method, decoded_args = self.decoder.decode(self.encoder.encode((0, 1, method, args)))
+            target = getattr(self.core, decoded_method)
+            return target(*EngineCoreProc._convert_msgspec_args(target, decoded_args))
+
+    async def run() -> None:
+        client = UtilityRoundTripClient()
+        pool = StagePool(0, [client])  # type: ignore[arg-type]
+        request = LoRARequest(lora_name="adapter", lora_int_id=7, lora_path="/unused/adapter")
+        assert await pool.collective_rpc(0, "add_lora", args=(request,)) is True
+        assert isinstance(worker.received, LoRARequest)
+        assert worker.received.lora_int_id == 7
 
     asyncio.run(run())
