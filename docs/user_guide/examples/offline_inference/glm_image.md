@@ -7,7 +7,7 @@ declarative config system. The pipeline topology and stage structure are declare
 
 ## Architecture
 
-```
+```text
 Stage 0 (AR Model)                Stage 1 (Diffusion)
 ┌───────────────────┐            ┌─────────────────────┐
 │ vLLM-optimized    │  prior     │  GlmImagePipeline   │
