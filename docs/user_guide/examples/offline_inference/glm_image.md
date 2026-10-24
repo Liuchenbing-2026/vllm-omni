@@ -46,6 +46,11 @@ if __name__ == "__main__":
     outputs[0].images[0].save("output.png")
 ```
 
+If the AR stage generates more image tokens than the text-to-image preview and
+target grids require, the parser rejects the sequence. The AR-to-diffusion bridge
+logs the token-count error and skips the invalid prior instead of passing a
+truncated, misaligned grid to the diffusion stage.
+
 ## Image-to-Image (Image Editing)
 
 ```python
