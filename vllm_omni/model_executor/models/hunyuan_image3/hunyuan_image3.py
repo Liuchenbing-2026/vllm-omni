@@ -1952,11 +1952,8 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
         vit_spatial_shapes = pixel_values["vit_spatial_shapes"]
         vae_pixel_values = pixel_values["vae_pixel_values"]
         vae_generator_seed = pixel_values.get("vae_generator_seed")
-        vae_generator = None
-        if vae_generator_seed is not None and vae_generator_seed.numel() > 0:
-            vae_generator = torch.Generator(device=vae_pixel_values[0].device).manual_seed(
-                int(vae_generator_seed.reshape(-1)[0].item())
-            )
+        if vae_generator_seed is not None:
+            vae_generator_seed = vae_generator_seed.reshape(-1)
 
         # Perform ViT encoding
         vit_embeddings = self._vit_encode(vit_pixel_values, vit_pixel_attention_mask, vit_spatial_shapes)
@@ -1964,7 +1961,14 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
         # VAE encode + patch_embed per image — each cond image is at its own
         # `reso_group` bucket so shapes are ragged across the image-batch dim.
         vae_token_embeddings = []
-        for vae_image_i in vae_pixel_values:
+        for image_idx, vae_image_i in enumerate(vae_pixel_values):
+            # Seeds are batched per image. Keep both seed selection and RNG
+            # state independent of other requests in the encoder batch.
+            vae_generator = None
+            if vae_generator_seed is not None and vae_generator_seed.numel() > 0:
+                vae_generator = torch.Generator(device=vae_image_i.device).manual_seed(
+                    int(vae_generator_seed[image_idx].item())
+                )
             t_i, latents_i = self._vae_encode(vae_image_i.unsqueeze(0), vae_cfg_factor, generator=vae_generator)
             t_emb = self.time_embed(t_i[0])
             vae_tokens, _, _ = self.patch_embed(latents_i, t_emb)
