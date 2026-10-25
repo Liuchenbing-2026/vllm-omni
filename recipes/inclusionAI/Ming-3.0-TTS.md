@@ -64,6 +64,23 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/vllm serve "$MODEL" \
 Use `--revision <HF-commit>` to pin a checkpoint. The HF model weights download
 automatically on first launch.
 
+## Generation length
+
+For single-speaker and unconditional requests, `max_new_tokens` limits generated
+**audio-latent steps**, not text tokens. When omitted, the adapter uses the
+checkpoint's `tts_config.maximum_decode_steps`. The
+[published Tiny checkpoint configuration](https://huggingface.co/inclusionAI/Ming-3.0-tts-tiny/blob/7bd9446a8d47e462362261a0150258da6d458318/config.json)
+sets this to 250: approximately 20 seconds at 12.5 latent steps per second.
+The adapter's limit of 800 is a request ceiling and a fallback for checkpoints
+without this setting; it does not override a checkpoint's default.
+
+For longer text, set `"max_new_tokens": 600`, for example, in the speech request
+JSON. The supported maximum is 800. This raises the generation cap, but does not
+guarantee that the model will speak every input word or produce that duration:
+the stop head can end generation earlier. Split long passages into separate
+requests when needed. Podcast uses text-derived decode bounds instead; see the
+Podcast notes below.
+
 ## Voice cloning
 
 Use the downloaded `speaker_1.wav` and its exact transcript. Omit `ref_text`
