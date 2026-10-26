@@ -713,6 +713,34 @@ class DiffusionCacheConfig:
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{item}'")
 
 
+def _resolve_bailing_image_pipeline_class(
+    model: str,
+    revision: str | None = None,
+) -> str:
+    """Distinguish Ming-Image from Ming-Flash-Omni using the DiT config.
+
+    Both checkpoints share the Bailing root configuration. Ming-Image's
+    Design-Layer variant instead identifies its vendor transformer in
+    ``transformer/config.json``.
+    """
+    from vllm.transformers_utils.config import get_hf_file_to_dict
+
+    try:
+        transformer_cfg = (
+            get_hf_file_to_dict(
+                "transformer/config.json",
+                model,
+                revision=revision,
+            )
+            or {}
+        )
+    except Exception:
+        transformer_cfg = {}
+    if transformer_cfg.get("_class_name") == "DiffusionTransformer":
+        return "MingImageDiffusionPipeline"
+    return "MingImagePipeline"
+
+
 def resolve_model_class_name(
     model: str | None,
     diffusion_load_format: str = "default",
@@ -774,7 +802,7 @@ def resolve_model_class_name(
         "ming_flash_omni",
         "ming_flash_omni_thinker",
     ):
-        return "MingImagePipeline"
+        return _resolve_bailing_image_pipeline_class(model, revision)
     if model_type == "nextstep":
         return "NextStep11Pipeline"
     if model_type == "s2v":
@@ -1763,10 +1791,14 @@ class OmniDiffusionConfig:
                     "ming_flash_omni",
                     "ming_flash_omni_thinker",
                 ):
-                    # Ming-flash-omni-2.0 — imagegen stage uses the custom
-                    # ``MingImagePipeline`` (ZImage DiT + Qwen2 connector). See
-                    # vllm_omni/diffusion/models/ming_flash_omni/pipeline_ming_imagegen.py.
-                    self.model_class_name = "MingImagePipeline"
+                    # The root Bailing config is shared by Ming-Image and
+                    # Ming-Flash-Omni. Preserve an explicit deployment topology
+                    # and fall back to the DiT signature for auto-discovery.
+                    if self.model_class_name != "MingImageDiffusionPipeline":
+                        self.model_class_name = _resolve_bailing_image_pipeline_class(
+                            self.model,
+                            self.revision,
+                        )
                     self.tf_model_config = TransformerConfig()
                     self.update_multimodal_support()
                 elif model_type == "nextstep":

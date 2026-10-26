@@ -7,7 +7,7 @@ import pytest
 import torch
 from vllm.multimodal.processing import ProcessorInputs
 
-from vllm_omni.diffusion.data import OmniDiffusionConfig
+from vllm_omni.diffusion.data import OmniDiffusionConfig, resolve_model_class_name
 from vllm_omni.diffusion.models.ming_image.pipeline import (
     MingImageDiffusionPipeline,
     _validate_variant_config,
@@ -254,13 +254,23 @@ def test_multimodal_processor_applies_generation_template(monkeypatch: pytest.Mo
 
 
 @pytest.mark.parametrize(
-    ("pipeline_config", "expected_class_name"),
-    ((MING_IMAGE_PIPELINE, "MingImageDiffusionPipeline"), (None, None)),
+    ("pipeline_config", "resolved_class_name", "expected_class_name"),
+    (
+        (MING_IMAGE_PIPELINE, "MingImagePipeline", "MingImageDiffusionPipeline"),
+        (None, "MingImagePipeline", "MingImagePipeline"),
+        (None, None, None),
+    ),
 )
-def test_engine_od_config_falls_back_to_registered_pipeline_class(monkeypatch, pipeline_config, expected_class_name):
-    # Ming-Image ships neither a root config.json nor model_index.json for now,
-    # so class-name resolution returns None; serving must still find the extras (e.g. num_layers).
-    monkeypatch.setattr("vllm_omni.diffusion.data.resolve_model_class_name", lambda model, **kwargs: None)
+def test_engine_od_config_prefers_registered_pipeline_class(
+    monkeypatch, pipeline_config, resolved_class_name, expected_class_name
+):
+    # The checkpoint's root config is shared with Ming-Flash-Omni, so generic
+    # resolution returns MingImagePipeline. An explicit deploy topology must
+    # still provide the authoritative diffusion class and its extras.
+    monkeypatch.setattr(
+        "vllm_omni.diffusion.data.resolve_model_class_name",
+        lambda model, **kwargs: resolved_class_name,
+    )
     engine = object.__new__(AsyncOmniEngine)
     engine.model = "inclusionAI/Ming-Image-0.1-Design-Layer"
     engine.pipeline_config = pipeline_config
@@ -269,8 +279,81 @@ def test_engine_od_config_falls_back_to_registered_pipeline_class(monkeypatch, p
     od_config = engine.get_diffusion_od_config()
 
     assert od_config.model_class_name == expected_class_name
-    assert ("num_layers" in get_extra_body_params(od_config.model_class_name)) is (expected_class_name is not None)
+    assert ("num_layers" in get_extra_body_params(od_config.model_class_name)) is (
+        expected_class_name == "MingImageDiffusionPipeline"
+    )
     assert engine.get_diffusion_od_config() is od_config
+
+
+@pytest.mark.parametrize(
+    ("transformer_class_name", "expected_class_name"),
+    (
+        ("DiffusionTransformer", "MingImageDiffusionPipeline"),
+        ("ZImageTransformer2DModel", "MingImagePipeline"),
+    ),
+)
+def test_bailing_resolver_distinguishes_image_pipeline_from_dit_config(
+    monkeypatch, transformer_class_name, expected_class_name
+):
+    def _get_hf_file_to_dict(filename, model, revision=None):
+        del model, revision
+        if filename == "config.json":
+            return {
+                "architectures": ["BailingMM2NativeForConditionalGeneration"],
+                "model_type": "bailingmm_moe_v2_lite",
+            }
+        if filename == "transformer/config.json":
+            return {"_class_name": transformer_class_name}
+        return None
+
+    monkeypatch.setattr(
+        "vllm_omni.diffusion.utils.hf_utils.get_diffusion_model_index",
+        lambda model, revision=None: None,
+    )
+    monkeypatch.setattr(
+        "vllm_omni.diffusion.utils.hf_utils.resolve_native_diffusion_model_class",
+        lambda model: None,
+    )
+    monkeypatch.setattr("vllm.transformers_utils.config.get_hf_file_to_dict", _get_hf_file_to_dict)
+
+    assert resolve_model_class_name("test/bailing-image-checkpoint") == expected_class_name
+
+
+@pytest.mark.parametrize(
+    ("explicit_class_name", "transformer_class_name", "expected_class_name"),
+    (
+        ("MingImageDiffusionPipeline", "DiffusionTransformer", "MingImageDiffusionPipeline"),
+        (None, "DiffusionTransformer", "MingImageDiffusionPipeline"),
+        (None, "ZImageTransformer2DModel", "MingImagePipeline"),
+    ),
+)
+def test_enrich_config_preserves_explicit_bailing_image_pipeline(
+    monkeypatch, explicit_class_name, transformer_class_name, expected_class_name
+):
+    def _get_hf_file_to_dict(filename, model, revision=None):
+        del model, revision
+        if filename == "config.json":
+            return {
+                "architectures": ["BailingMM2NativeForConditionalGeneration"],
+                "model_type": "bailingmm_moe_v2_lite",
+            }
+        if filename == "transformer/config.json":
+            return {"_class_name": transformer_class_name}
+        return None
+
+    monkeypatch.setattr(
+        "vllm_omni.diffusion.utils.hf_utils.get_diffusion_model_index",
+        lambda model, revision=None: None,
+    )
+    monkeypatch.setattr("vllm.transformers_utils.config.get_hf_file_to_dict", _get_hf_file_to_dict)
+    config = OmniDiffusionConfig(
+        model="test/bailing-image-checkpoint",
+        model_class_name=explicit_class_name,
+    )
+
+    config.enrich_config()
+
+    assert config.model_class_name == expected_class_name
 
 
 def test_two_stage_topology_and_request_metadata():
