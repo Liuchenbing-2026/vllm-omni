@@ -42,7 +42,7 @@ jobs:
           uv pip install --python .venv/bin/python --torch-backend cpu \
             -r source-8883/requirements/cpu.txt \
             'pytest==9.1.1' 'pytest-asyncio==1.4.0' 'pytest-mock==3.15.1' \
-            'pytest-subtests==0.15.0' 'pytest-shard==0.1.2' \
+            'pytest-subtests==0.15.0' 'pytest-shard==0.1.2' 'pytest-xdist==3.8.0' \
             psutil datasets librosa torchaudio \
             2>&1 | tee results/install-omni.log
           uv pip install --python .venv/bin/python --no-deps -e source-8883 2>&1 | tee results/install-editable.log
