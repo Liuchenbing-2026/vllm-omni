@@ -1,0 +1,72 @@
+name: Speech PR native CPU validation
+on:
+  push:
+    branches: [verify/speech-8883-8884-cpu-20261027]
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      VLLM_TARGET_DEVICE: cpu
+      VLLM_OMNI_TARGET_DEVICE: cpu
+      OMP_NUM_THREADS: '2'
+      OPENBLAS_NUM_THREADS: '2'
+      CUDA_VISIBLE_DEVICES: ''
+      HIP_VISIBLE_DEVICES: ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare exact public sources and native CPU dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          python -m pip install uv
+          for pair in '8883 91d733385e8b7acf9808888c87ee84174763208c' '8884 685e9893c9328f406976ca2606837e009cf96e49'; do
+            read -r pr sha <<< "$pair"
+            git init "source-$pr"
+            git -C "source-$pr" fetch --depth=1 https://github.com/Liuchenbing-2026/vllm-omni.git "$sha"
+            git -C "source-$pr" checkout --detach FETCH_HEAD
+            test "$(git -C "source-$pr" rev-parse HEAD)" = "$sha"
+          done
+          uv venv .venv
+          uv pip install --python .venv/bin/python --torch-backend cpu \
+            'vllm @ https://wheels.vllm.ai/5df63a7203cdb9328d824a27b682e77c7b9928be/vllm-0.32.0%2Bcpu-cp38-abi3-manylinux_2_39_x86_64.whl' \
+            2>&1 | tee results/install-vllm.log
+          uv pip install --python .venv/bin/python --torch-backend cpu \
+            -r source-8883/requirements/cpu.txt \
+            'pytest==9.1.1' 'pytest-asyncio==1.4.0' 'pytest-mock==3.15.1' \
+            'pytest-subtests==0.15.0' 'pytest-shard==0.1.2' \
+            psutil datasets librosa torchaudio \
+            2>&1 | tee results/install-omni.log
+          uv pip install --python .venv/bin/python --no-deps -e source-8883 2>&1 | tee results/install-editable.log
+          uv pip freeze --python .venv/bin/python > results/requirements.lock
+          .venv/bin/python - <<'PY' | tee results/runtime.txt
+          import platform, importlib.metadata, torch
+          from vllm._version import __commit_id__
+          print(platform.platform())
+          for name in ('vllm', 'torch', 'transformers', 'pytest'):
+              print(name, importlib.metadata.version(name))
+          print('vllm commit', __commit_id__)
+          commit = (__commit_id__ or '').removeprefix('g')
+          assert len(commit) >= 8 and '5df63a7203cdb9328d824a27b682e77c7b9928be'.startswith(commit)
+          assert not torch.cuda.is_available()
+          PY
+      - name: Run unmodified repository tests for both exact PR heads
+        shell: bash
+        run: |
+          bash run-native.sh
+      - name: Preserve logs and JUnit even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: speech-native-cpu-evidence
+          path: results/
+          retention-days: 14
+          if-no-files-found: warn
