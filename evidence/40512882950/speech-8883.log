@@ -1,0 +1,41 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.15, pytest-9.1.1, pluggy-1.7.0
+rootdir: /home/runner/work/vllm-omni/vllm-omni/source-8883
+configfile: pyproject.toml
+plugins: asyncio-1.4.0, mock-3.15.1, shard-0.1.2, platformdirs-4.13.6, xdist-3.8.0, anyio-4.15.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 388 items
+Running 388 items in this shard
+
+tests/entrypoints/openai_api/test_serving_speech.py .................... [  5%]
+........................................................................ [ 23%]
+........................................................................ [ 42%]
+........................................................................ [ 60%]
+........................................................................ [ 79%]
+........................................................................ [ 97%]
+........                                                                 [100%]
+
+=============================== warnings summary ===============================
+../.venv/lib/python3.12/site-packages/torch/jit/_script.py:365: 14 warnings
+  /home/runner/work/vllm-omni/vllm-omni/.venv/lib/python3.12/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+vllm_omni/version.py:55
+  /home/runner/work/vllm-omni/vllm-omni/source-8883/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+   --> vLLM-Omni version 0.1.dev1+g91d733385.cpu
+   --> vLLM version 0.32.0
+  This will likely cause compatibility issues.
+    warn_if_misaligned_vllm_version()
+
+../.venv/lib/python3.12/site-packages/vllm/entrypoints/openai/api_server.py:24
+  /home/runner/work/vllm-omni/vllm-omni/.venv/lib/python3.12/site-packages/vllm/entrypoints/openai/api_server.py:24: DeprecationWarning: `vllm.entrypoints.openai.api_server` is deprecated and will likely beunsupported in a future version. Use the corresponding function from `vllm.entrypoints.launchers` instead.
+    warnings.warn(
+
+vllm_omni/protocol/realtime/audio.py:17
+  /home/runner/work/vllm-omni/vllm-omni/source-8883/vllm_omni/protocol/realtime/audio.py:17: DeprecationWarning: 'audioop' is deprecated and slated for removal in Python 3.13
+    from audioop import alaw2lin, lin2alaw, lin2ulaw, ulaw2lin
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+- generated xml file: /home/runner/work/vllm-omni/vllm-omni/results/speech-8883.xml -
+--- Running Summary
+======================= 388 passed, 17 warnings in 9.07s =======================

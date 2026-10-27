@@ -1,0 +1,38 @@
+[
+  {
+    "pr": 8883,
+    "suite": "speech",
+    "passed": 388,
+    "failed": 0,
+    "skipped": 0,
+    "junit": "closure/run-40512882950-artifacts/speech-8883.xml",
+    "sha256": "f0423faa122c1de5b664e14b0386431b6402c80571d98c0cdb6075bb8b640419"
+  },
+  {
+    "pr": 8883,
+    "suite": "comfy",
+    "passed": 19,
+    "failed": 0,
+    "skipped": 0,
+    "junit": "closure/run-40512882950-artifacts/comfy-8883.xml",
+    "sha256": "2e5fd2879e33b746eba0fe73d85a2071a85466fcfd6313b54d8844c2f18e1eab"
+  },
+  {
+    "pr": 8884,
+    "suite": "speech",
+    "passed": 386,
+    "failed": 0,
+    "skipped": 0,
+    "junit": "closure/run-40512882950-artifacts/speech-8884.xml",
+    "sha256": "74cf469e46219f7779dad753977c64c86b2849996dd3c9674b29241ecb81c80e"
+  },
+  {
+    "pr": 8884,
+    "suite": "comfy",
+    "passed": 19,
+    "failed": 0,
+    "skipped": 0,
+    "junit": "closure/run-40512882950-artifacts/comfy-8884.xml",
+    "sha256": "ff92da3952a65ef928ad3328a81fc7a93c0f98721c1555b27605d580ca12728a"
+  }
+]

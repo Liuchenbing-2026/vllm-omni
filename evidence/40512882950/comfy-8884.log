@@ -1,0 +1,29 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.15, pytest-9.1.1, pluggy-1.7.0
+rootdir: /home/runner/work/vllm-omni/vllm-omni/source-8884
+configfile: pyproject.toml
+plugins: asyncio-1.4.0, mock-3.15.1, shard-0.1.2, platformdirs-4.13.6, xdist-3.8.0, anyio-4.15.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 19 items
+Running 19 items in this shard
+
+tests/e2e/features/comfyui/test_h3_all_in_one_workflow.py ........       [ 42%]
+tests/e2e/features/comfyui/test_h3_music_video_workflow.py .......       [ 78%]
+tests/e2e/features/comfyui/test_h3_timeline_guides_workflow.py ....      [100%]
+
+=============================== warnings summary ===============================
+../.venv/lib/python3.12/site-packages/torch/jit/_script.py:365: 14 warnings
+  /home/runner/work/vllm-omni/vllm-omni/.venv/lib/python3.12/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+vllm_omni/version.py:55
+  /home/runner/work/vllm-omni/vllm-omni/source-8884/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+   --> vLLM-Omni version 0.1.dev1+g91d733385.cpu
+   --> vLLM version 0.32.0
+  This will likely cause compatibility issues.
+    warn_if_misaligned_vllm_version()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+- generated xml file: /home/runner/work/vllm-omni/vllm-omni/results/comfy-8884.xml -
+--- Running Summary
+======================= 19 passed, 15 warnings in 0.13s ========================

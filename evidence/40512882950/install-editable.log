@@ -1,0 +1,6 @@
+Resolved 1 package in 3.10s
+   Building vllm-omni @ file:///home/runner/work/vllm-omni/vllm-omni/source-8883
+      Built vllm-omni @ file:///home/runner/work/vllm-omni/vllm-omni/source-8883
+Prepared 1 package in 761ms
+Installed 1 package in 8ms
+ + vllm-omni==0.1.dev1+g91d733385.cpu (from file:///home/runner/work/vllm-omni/vllm-omni/source-8883)

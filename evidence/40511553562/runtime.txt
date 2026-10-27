@@ -1,0 +1,6 @@
+Linux-6.17.0-1022-azure-x86_64-with-glibc2.39
+vllm 0.32.0+cpu
+torch 2.13.0+cpu
+transformers 5.19.0
+pytest 9.1.1
+vllm commit g5df63a720

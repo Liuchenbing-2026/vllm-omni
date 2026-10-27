@@ -1,0 +1,61 @@
+{
+  "observed_at": "2026-10-27T13:39:43.535267+00:00",
+  "pr": 8884,
+  "head": "685e9893c9328f406976ca2606837e009cf96e49",
+  "state": "open",
+  "mergeable": true,
+  "mergeable_state": "blocked",
+  "checks": [
+    {
+      "name": "CodeQL",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/vllm-project/vllm-omni/runs/122205945839"
+    },
+    {
+      "name": "build (3.12)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/vllm-project/vllm-omni/actions/runs/40507648877/job/122200967472"
+    },
+    {
+      "name": "pre-commit",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/vllm-project/vllm-omni/actions/runs/40507648952/job/122200967223"
+    },
+    {
+      "name": "Analyze",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/vllm-project/vllm-omni/actions/runs/40507648892/job/122200966604"
+    },
+    {
+      "name": "build (3.11)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/vllm-project/vllm-omni/actions/runs/40507648877/job/122200966449"
+    },
+    {
+      "name": "DCO",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/vllm-project/vllm-omni/runs/122200948602"
+    }
+  ],
+  "statuses": [
+    {
+      "context": "docs/readthedocs.org:vllm-omni",
+      "state": "success",
+      "url": "https://vllm--8884.org.readthedocs.build/projects/vllm-omni/en/8884/"
+    }
+  ],
+  "reviews": [
+    {
+      "user": "linyueqian",
+      "state": "APPROVED",
+      "commit": "d45dbf20b66e7070fe78e08d4702dc0738fc6a8d",
+      "time": "2026-10-25T08:04:48Z"
+    }
+  ]
+}
